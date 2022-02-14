@@ -57,6 +57,7 @@ jobs:
           unzip ${{ steps.var.outputs.filename }}.zip
           rm -rf ${{ steps.var.outputs.filename }}.zip
           python3 update-payload-extractor/extract.py payload.bin --output_dir ./output/
+          rm -rf payload.bin META-INF apex_info.pb care_map.pb payload_properties.txt
           ls output/
 
       - name: Patching fstabs
@@ -71,92 +72,64 @@ jobs:
             sudo sed -i 's/,avb//g' $fstab
             sudo sed -i 's/forceencrypt/encryptable/g' $fstab
             sudo sed -i 's/fileencryption=ice/encryptable=footer/g' $fstab
+            sudo sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/boot                      /boot                    emmc    defaults                                             recoveryonly' $fstab
+            sudo sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/recovery                  /recovery                emmc    defaults                                             recoveryonly' $fstab
             sudo sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/cache                     /cache                   ext4    nosuid,noatime,nodev,barrier=1                       wait' $fstab
+            sudo sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/vendor                    /vendor                  ext4    ro,barrier=1                                         wait,recoveryonly' $fstab
             cat vendor/etc/fstab.qcom
             sudo cp vendor/etc/fstab.qcom output/fstab.qcom
             sudo umount vendor
             sudo rm -rf vendor
 
-      - name: Mkbootimg
-        run: |
-          echo "mkbooting"
-          mv output/boot.img mkbootimg/
-          cd mkbootimg
-          ./mkboot boot.img boot
-          rm boot.img
-          cd boot
-          cat img_info
-          sed -i 's/androidboot.vbmeta.avb_version=...//g' img_info
-          cat img_info
-          cp img_info ../../output/
-          ls -al
-          cd ..
-          ./mkboot boot boot.img
-          ls -al
-          mv boot.img ../output/
-          cd ..
-
-      - name: Mkdtimg
-        continue-on-error: true
-        run: |
-          echo "mkdting"
-          mv output/dtbo.img dtbo2dts/
-          cd dtbo2dts
-          python dtbo2dtsi.py
-          rm dtbo.img
-          ls -al
-          line="$(grep -n "vbmeta" dtsi.0)"
-          linea="$(echo $line | cut -d ":" -f 1)"
-          lineb="`expr $linea + 24`""p"
-          echo $linea
-          echo $lineb
-          sed -n "$linea,$lineb" dtsi.*
-          #sed -i '/parts/{n;d;}' dtsi.*
-          #sed -i '/parts/{n;d;}' dtsi.*
-          #sed -i '/vbmeta/d' dtsi.*
-          #sed -i '/android,vbmeta/d' dtsi.*
-          #sed -i '/parts/d' dtsi.*
-          sed -i 's/,slotselect//g' dtsi.*
-          sed -i 's/,avb//g' dtsi.*
-          sed -n "$linea,$lineb" dtsi.*
-          cp dtsi.* ../output/
-          python dtsi2dtbo.py
-          cp dtb_tmp.* ../output/
-          ls -al
-          cp dtbo_new.img ../output/dtbo.img
-          cd ../../
-          
-      - name: MakeMeSAR
+      - name: Patching boot
         run: |
           mkdir tmp
           mv output/boot.img tmp/
           cd tmp
           ../magiskboot unpack -h boot.img
           rm -f ramdisk.cpio
+          sed -i 's/androidboot.vbmeta.avb_version=...//g' header
+          sed -i "s/Android:#[a-zA-Z0-9]* //" header
+          sed -i "s/android-verity/linear/" header
           ls
           ../magiskboot repack boot.img
           ls -al
           cd ..
           mv tmp/new-boot.img output/boot.img
 
+      - name: Patching dtbo
+        continue-on-error: true
+        run: |
+          echo "patching dtbo"
+          mv output/dtbo.img ./
+          ./mkdtimg dump dtbo.img -b dtb
+          ./magiskboot dtb dtb.0 print -f
+          ./magiskboot dtb dtb.0 patch
+          ./dtc -q -I dtb -O dts -o dts.0 dtb.0
+          rm -rf dtb.0
+          ls
+          sed -i 's/,slotselect//g' dts.0
+          ./dtc -q -I dts -O dtb -o dtb.0 dts.0
+          rm -rf dts.0
+          ./magiskboot dtb dtb.0 print -f
+          ./mkdtimg create dtbo_new.img dtb.0
+          ls
+          cp dtbo_new.img output/dtbo.img
+
       - name: Patching vbmeta
         run: |
           echo "patching vbmeta"
           ls output
-          ./magiskboot --help
-          xxd -c 256 -u output/vbmeta.img | grep "0000 0000 0000 0000 6176 6274" > /dev/null 2>&1
-          echo $?
-          if [ $? -eq 0 ]; then
+          #./magiskboot --help
+          if [ ! -z $(xxd -c 256 -u output/vbmeta.img | grep "0000 0000 0000 0000 6176 6274") ]; then
               echo "Hex match!!"
               echo "Patching vbmeta..."
               ./magiskboot hexpatch output/vbmeta.img 000000000000000061766274 000000020000000061766274
               echo "Success!!!"
           else
-              echo "TEST FAILED"
-              echo "Testing Another Method"
+              echo "--flags=3"
               ./magiskboot hexpatch output/vbmeta.img 000000030000000061766274 000000020000000061766274
           fi
-          od -w16 -An -tx1 output/vbmeta.img
 
       - name: Packing
         run: |
